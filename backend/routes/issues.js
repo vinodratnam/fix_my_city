@@ -3,6 +3,7 @@ const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const Issue = require('../models/Issue');
 const auth = require('../middleware/auth');
+const { SLA_DAYS } = require('../services/slaService');
 
 const router = express.Router();
 
@@ -20,11 +21,13 @@ const upload = multer({ storage });
 // Get all issues
 router.get('/', async (req, res) => {
   try {
-    const { type, status, page = 1, limit = 10 } = req.query;
+    const { type, status, department, priority, page = 1, limit = 100 } = req.query;
     const query = {};
     
     if (type) query.type = type;
     if (status) query.status = status;
+    if (department) query.department = department;
+    if (priority) query.priority = priority;
 
     const issues = await Issue.find(query)
       .populate('reportedBy', 'name email')
@@ -46,10 +49,69 @@ router.get('/', async (req, res) => {
   }
 });
 
+// SLA Report — overdue and escalated issues (admin only)
+router.get('/sla-report', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+
+    const now = new Date();
+
+    // All non-resolved issues
+    const activeIssues = await Issue.find({
+      status: { $in: ['pending', 'in_progress'] },
+    }).populate('reportedBy', 'name email');
+
+    const slaReport = activeIssues.map((issue) => {
+      const priorityDays = SLA_DAYS[issue.priority || 'medium'];
+      const deadline = issue.slaDeadline
+        ? new Date(issue.slaDeadline)
+        : new Date(new Date(issue.createdAt).getTime() + priorityDays * 24 * 60 * 60 * 1000);
+
+      const msDiff = deadline.getTime() - now.getTime();
+      const hoursRemaining = Math.round(msDiff / (1000 * 60 * 60));
+      const daysRemaining = Math.round(msDiff / (1000 * 60 * 60 * 24));
+      const isOverdue = msDiff < 0;
+
+      return {
+        _id: issue._id,
+        title: issue.title,
+        status: issue.status,
+        priority: issue.priority,
+        department: issue.department,
+        reportedBy: issue.reportedBy,
+        createdAt: issue.createdAt,
+        slaDeadline: deadline,
+        escalated: issue.escalated,
+        isOverdue,
+        hoursRemaining,
+        daysRemaining,
+        slaDays: priorityDays,
+        location: issue.location?.address,
+      };
+    });
+
+    // Sort: most overdue first
+    slaReport.sort((a, b) => a.hoursRemaining - b.hoursRemaining);
+
+    const overdue = slaReport.filter(i => i.isOverdue).length;
+    const dueSoon = slaReport.filter(i => !i.isOverdue && i.daysRemaining <= 1).length;
+
+    res.json({ report: slaReport, overdue, dueSoon, total: slaReport.length });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('CivicWatch server error');
+  }
+});
+
 // Get issue by ID
 router.get('/:id', async (req, res) => {
   try {
-    const issue = await Issue.findById(req.params.id).populate('reportedBy', 'name email');
+    const issue = await Issue.findById(req.params.id)
+      .populate('reportedBy', 'name email role')
+      .populate('comments.user', 'name email role')
+      .populate('statusHistory.updatedBy', 'name email role');
     
     if (!issue) {
       return res.status(404).json({ message: 'CivicWatch issue not found' });
@@ -84,38 +146,22 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
     if (!latitude || !longitude) {
       return res.status(400).json({ message: 'Location coordinates are required' });
     }
-    if (!req.file) {
-      return res.status(400).json({ message: 'Image is required' });
+    // Image is now optional for testing
+    // if (!req.file) {
+    //   return res.status(400).json({ message: 'Image is required' });
+    // }
+
+    // Convert uploaded image to Base64 data URI if present, otherwise use placeholder
+    let imageUrl = 'https://picsum.photos/seed/infrastructure/400/300.jpg';
+    if (req.file) {
+      const base64Data = req.file.buffer.toString('base64');
+      imageUrl = `data:${req.file.mimetype};base64,${base64Data}`;
     }
 
-    // Temporarily using placeholder image URL instead of Cloudinary
-    let imageUrl = 'https://picsum.photos/seed/infrastructure/400/300.jpg';
-    
-    // TODO: Fix Cloudinary credentials and enable image upload
-    // Upload image to Cloudinary - temporarily disabled
-    // try {
-    //   const result = await new Promise((resolve, reject) => {
-    //     cloudinary.uploader.upload_stream(
-    //       { 
-    //         resource_type: 'image',
-    //         folder: 'infrastructure-issues'
-    //       },
-    //       (error, result) => {
-    //         if (error) {
-    //           console.error('Cloudinary upload error:', error);
-    //           reject(error);
-    //         } else {
-    //           console.log('Cloudinary upload success:', result);
-    //           resolve(result);
-    //         }
-    //       }
-    //     ).end(req.file.buffer);
-    //   });
-    //   imageUrl = result.secure_url;
-    // } catch (uploadError) {
-    //   console.error('Image upload failed:', uploadError);
-    //   return res.status(500).json({ message: 'Image upload failed' });
-    // }
+    const priority = req.body.priority || 'medium';
+    const { SLA_LIMITS_MS } = require('../services/slaService');
+    const slaMs = SLA_LIMITS_MS[priority] || SLA_LIMITS_MS.medium;
+    const slaDeadline = new Date(Date.now() + slaMs);
 
     const issue = new Issue({
       title: title.trim(),
@@ -126,8 +172,11 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
         address: address.trim()
       },
       imageUrl,
-      reportedBy: req.user.id
+      reportedBy: req.user.id,
+      priority,
+      slaDeadline,
     });
+
 
     await issue.save();
     await issue.populate('reportedBy', 'name email');
@@ -143,25 +192,186 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
   }
 });
 
-// Update issue status (admin only)
-router.put('/:id/status', auth, async (req, res) => {
+// Update issue status (admin only) with comment and after image
+router.put('/:id/status', auth, upload.single('afterImage'), async (req, res) => {
   try {
-    const { status } = req.body;
+    const { status, comment } = req.body;
 
     if (req.user.role !== 'admin') {
       return res.status(403).json({ message: 'Admin access required' });
     }
 
-    const issue = await Issue.findByIdAndUpdate(
-      req.params.id,
-      { status, updatedAt: Date.now() },
-      { new: true }
-    ).populate('reportedBy', 'name email');
-
+    const issue = await Issue.findById(req.params.id);
     if (!issue) {
       return res.status(404).json({ message: 'CivicWatch issue not found' });
     }
 
+    const previousStatus = issue.status;
+
+    // Add to status history
+    issue.statusHistory.push({
+      status,
+      updatedBy: req.user.id,
+      comment: comment || '',
+      timestamp: new Date()
+    });
+
+    // Update status
+    issue.status = status;
+    issue.updatedAt = Date.now();
+
+    // Add after image as base64 data URI if provided, otherwise use placeholder
+    if (req.file) {
+      const base64Data = req.file.buffer.toString('base64');
+      issue.afterImageUrl = `data:${req.file.mimetype};base64,${base64Data}`;
+    } else if (status === 'resolved') {
+      issue.afterImageUrl = 'https://picsum.photos/seed/resolved/400/300.jpg';
+    }
+
+    await issue.save();
+    await issue.populate('reportedBy', 'name email role');
+    await issue.populate('assignedTo', 'name email role');
+    await issue.populate('statusHistory.updatedBy', 'name email role');
+    await issue.populate('comments.user', 'name email role');
+
+    // ── Socket.io: emit real-time update ─────────────────────────────────────
+    const io = req.app.get('io');
+    if (io) {
+      const statusLabels = { pending: 'Pending', in_progress: 'In Progress', resolved: 'Resolved' };
+      const payload = {
+        issueId: issue._id,
+        issueTitle: issue.title,
+        newStatus: status,
+        previousStatus,
+        comment: comment || '',
+        updatedAt: issue.updatedAt,
+        issue  // full updated issue object
+      };
+
+      // Notify the reporter personally
+      const reporterId = issue.reportedBy?._id || issue.reportedBy;
+      if (reporterId) {
+        io.to(`user_${reporterId}`).emit('issueStatusChanged', {
+          ...payload,
+          message: `Your issue "${issue.title}" is now ${statusLabels[status] || status}`
+        });
+      }
+
+      // Broadcast to global room (admin dashboards, map views)
+      io.to('global').emit('issueUpdated', payload);
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    res.json(issue);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('CivicWatch server error');
+  }
+});
+
+// Reject resolution (reporter only)
+router.put('/:id/reject', auth, async (req, res) => {
+  try {
+    const { comment } = req.body;
+    if (!comment || !comment.trim()) {
+      return res.status(400).json({ message: 'Rejection reason comment is required' });
+    }
+
+    const issue = await Issue.findById(req.params.id);
+    if (!issue) {
+      return res.status(404).json({ message: 'Issue not found' });
+    }
+
+    // Only the reporter can reject the resolution
+    if (issue.reportedBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'Only the citizen who reported this issue can reject the resolution' });
+    }
+
+    if (issue.status !== 'resolved') {
+      return res.status(400).json({ message: 'Only resolved issues can be rejected' });
+    }
+
+    // Move status back to in_progress
+    issue.status = 'in_progress';
+    issue.updatedAt = Date.now();
+    
+    // Add to history
+    issue.statusHistory.push({
+      status: 'in_progress',
+      updatedBy: req.user.id,
+      comment: `Resolution Rejected by Citizen: "${comment.trim()}"`,
+      timestamp: new Date()
+    });
+
+    await issue.save();
+    await issue.populate('reportedBy', 'name email role');
+    await issue.populate('statusHistory.updatedBy', 'name email role');
+
+    // ── Socket.io: notify admin global room of rejection ─────────────────────
+    const io = req.app.get('io');
+    if (io) {
+      io.to('global').emit('issueUpdated', {
+        issueId: issue._id,
+        issueTitle: issue.title,
+        newStatus: 'in_progress',
+        previousStatus: 'resolved',
+        comment: `Resolution Rejected by Citizen: "${comment.trim()}"`,
+        updatedAt: issue.updatedAt,
+        issue
+      });
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+    
+    res.json(issue);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('CivicWatch server error');
+  }
+});
+
+// Accept resolution (reporter only)
+router.put('/:id/accept', auth, async (req, res) => {
+  try {
+    const issue = await Issue.findById(req.params.id);
+    if (!issue) {
+      return res.status(404).json({ message: 'Issue not found' });
+    }
+
+    // Only the reporter can accept the resolution
+    if (issue.reportedBy.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'Only the citizen who reported this issue can accept the resolution' });
+    }
+
+    if (issue.status !== 'resolved') {
+      return res.status(400).json({ message: 'Only resolved issues can be accepted' });
+    }
+
+    // Add to history
+    issue.statusHistory.push({
+      status: 'resolved',
+      updatedBy: req.user.id,
+      comment: 'Resolution Accepted by Citizen. Closed.',
+      timestamp: new Date()
+    });
+
+    await issue.save();
+    await issue.populate('reportedBy', 'name email role');
+    await issue.populate('statusHistory.updatedBy', 'name email role');
+
+    // ── Socket.io: broadcast acceptance to global room ───────────────────────
+    const io = req.app.get('io');
+    if (io) {
+      io.to('global').emit('issueUpdated', {
+        issueId: issue._id,
+        issueTitle: issue.title,
+        newStatus: 'resolved',
+        comment: 'Resolution Accepted by Citizen. Closed.',
+        updatedAt: new Date(),
+        issue
+      });
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+    
     res.json(issue);
   } catch (err) {
     console.error(err.message);
@@ -188,6 +398,112 @@ router.get('/nearby/:lat/:lng', async (req, res) => {
     }).populate('reportedBy', 'name email');
 
     res.json(issues);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('CivicWatch server error');
+  }
+});
+
+// Upvote issue
+router.post('/:id/upvote', auth, async (req, res) => {
+  try {
+    const issue = await Issue.findById(req.params.id);
+    if (!issue) {
+      return res.status(404).json({ message: 'CivicWatch issue not found' });
+    }
+
+    const hasUpvoted = issue.upvotes.includes(req.user.id);
+    if (hasUpvoted) {
+      // Remove upvote
+      issue.upvotes = issue.upvotes.filter(id => id.toString() !== req.user.id);
+    } else {
+      // Add upvote
+      issue.upvotes.push(req.user.id);
+    }
+
+    await issue.save();
+    res.json({ upvoted: !hasUpvoted, upvotes: issue.upvotes.length });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('CivicWatch server error');
+  }
+});
+
+// Add comment to issue
+router.post('/:id/comments', auth, async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || !text.trim()) {
+      return res.status(400).json({ message: 'Comment text is required' });
+    }
+
+    const issue = await Issue.findById(req.params.id);
+    if (!issue) {
+      return res.status(404).json({ message: 'CivicWatch issue not found' });
+    }
+
+    issue.comments.push({
+      user: req.user.id,
+      text: text.trim(),
+      createdAt: new Date()
+    });
+
+    await issue.save();
+    await issue.populate('comments.user', 'name email');
+
+    res.json(issue.comments);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('CivicWatch server error');
+  }
+});
+
+// Assign department (admin only)
+router.put('/:id/department', auth, async (req, res) => {
+  try {
+    const { department } = req.body;
+
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+
+    const issue = await Issue.findByIdAndUpdate(
+      req.params.id,
+      { department, updatedAt: Date.now() },
+      { new: true }
+    ).populate('reportedBy', 'name email');
+
+    if (!issue) {
+      return res.status(404).json({ message: 'CivicWatch issue not found' });
+    }
+
+    res.json(issue);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('CivicWatch server error');
+  }
+});
+
+// Set priority (admin only)
+router.put('/:id/priority', auth, async (req, res) => {
+  try {
+    const { priority } = req.body;
+
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+
+    const issue = await Issue.findByIdAndUpdate(
+      req.params.id,
+      { priority, updatedAt: Date.now() },
+      { new: true }
+    ).populate('reportedBy', 'name email');
+
+    if (!issue) {
+      return res.status(404).json({ message: 'CivicWatch issue not found' });
+    }
+
+    res.json(issue);
   } catch (err) {
     console.error(err.message);
     res.status(500).send('CivicWatch server error');

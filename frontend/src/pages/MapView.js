@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import api from '../api';
 import GoogleMap from '../components/GoogleMap';
 import FallbackMap from '../components/FallbackMap';
 
@@ -18,7 +18,7 @@ const MapView = () => {
   const fetchIssues = async () => {
     try {
       console.log('Fetching issues from backend...');
-      const response = await axios.get('https://fix-my-city-udyu.onrender.com/api/issues');
+      const response = await api.get('/issues');
       console.log('Issues fetched successfully:', response.data);
       setIssues(response.data.issues);
       

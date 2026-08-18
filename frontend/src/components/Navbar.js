@@ -72,12 +72,20 @@ const Navbar = () => {
                   Report Issue
                 </Link>
                 {user.role === 'admin' && (
-                  <Link
-                    to="/admin"
-                    className="font-medium text-blue-600 hover:text-blue-500 transition-colors"
-                  >
-                    Admin
-                  </Link>
+                  <>
+                    <Link
+                      to="/admin"
+                      className="font-medium text-blue-600 hover:text-blue-500 transition-colors"
+                    >
+                      Admin
+                    </Link>
+                    <Link
+                      to="/analytics"
+                      className="font-medium text-purple-600 hover:text-purple-500 transition-colors"
+                    >
+                      📊 Analytics
+                    </Link>
+                  </>
                 )}
                 <div className="flex items-center space-x-3 ml-4 pl-4 border-l border-gray-300">
                   {/* User Profile Logo */}
@@ -176,13 +184,22 @@ const Navbar = () => {
                     Report Issue
                   </Link>
                   {user.role === 'admin' && (
-                    <Link
-                      to="/admin"
-                      className="block px-4 py-2 rounded-lg text-sm font-medium text-blue-600 hover:bg-gray-100 transition-colors"
-                      onClick={() => setIsMobileMenuOpen(false)}
-                    >
-                      Admin
-                    </Link>
+                    <>
+                      <Link
+                        to="/admin"
+                        className="block px-4 py-2 rounded-lg text-sm font-medium text-blue-600 hover:bg-gray-100 transition-colors"
+                        onClick={() => setIsMobileMenuOpen(false)}
+                      >
+                        Admin
+                      </Link>
+                      <Link
+                        to="/analytics"
+                        className="block px-4 py-2 rounded-lg text-sm font-medium text-purple-600 hover:bg-gray-100 transition-colors"
+                        onClick={() => setIsMobileMenuOpen(false)}
+                      >
+                        📊 Analytics
+                      </Link>
+                    </>
                   )}
                   <div className="border-t border-gray-200 pt-2 mt-2">
                     <div className="px-4 py-2 flex items-center space-x-3">

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
+import { SocketProvider } from './context/SocketContext';
 import Navbar from './components/Navbar';
 import Landing from './pages/Landing';
 import Home from './pages/Home';
@@ -9,6 +10,7 @@ import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import ReportIssue from './pages/ReportIssue';
 import AdminDashboard from './pages/AdminDashboard';
+import AnalyticsDashboard from './pages/AnalyticsDashboard';
 import MapView from './pages/MapView';
 import PrivateRoute from './components/PrivateRoute';
 import AdminRoute from './components/AdminRoute';
@@ -16,8 +18,9 @@ import AdminRoute from './components/AdminRoute';
 function App() {
   return (
     <AuthProvider>
-      <div className="min-h-screen bg-gray-50">
-        <Navbar />
+      <SocketProvider>
+        <div className="min-h-screen bg-gray-50">
+          <Navbar />
         <Routes>
           <Route path="/landing" element={<Landing />} />
           <Route path="/login" element={<Login />} />
@@ -55,8 +58,17 @@ function App() {
               </AdminRoute>
             }
           />
+          <Route
+            path="/analytics"
+            element={
+              <AdminRoute>
+                <AnalyticsDashboard />
+              </AdminRoute>
+            }
+          />
         </Routes>
-      </div>
+        </div>
+      </SocketProvider>
     </AuthProvider>
   );
 }

@@ -1,5 +1,5 @@
 import React, { createContext, useState, useContext, useEffect } from 'react';
-import axios from 'axios';
+import api from '../api';
 
 const AuthContext = createContext();
 
@@ -18,8 +18,7 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     const token = localStorage.getItem('token');
     if (token) {
-      axios.defaults.headers.common['x-auth-token'] = token;
-      // You might want to add a route to verify token and get user info
+      // Token is automatically attached by our api interceptor
       const userData = localStorage.getItem('user');
       if (userData) {
         setUser(JSON.parse(userData));
@@ -30,7 +29,7 @@ export const AuthProvider = ({ children }) => {
 
   const login = async (email, password) => {
     try {
-      const response = await axios.post('https://fix-my-city-udyu.onrender.com/api/auth/login', {
+      const response = await api.post('/auth/login', {
         email,
         password,
       });
@@ -38,7 +37,6 @@ export const AuthProvider = ({ children }) => {
       const { token, user } = response.data;
       localStorage.setItem('token', token);
       localStorage.setItem('user', JSON.stringify(user));
-      axios.defaults.headers.common['x-auth-token'] = token;
       setUser(user);
       return { success: true };
     } catch (error) {
@@ -49,18 +47,19 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  const register = async (name, email, password) => {
+  const register = async (name, email, password, role = 'citizen', adminCode = '') => {
     try {
-      const response = await axios.post('https://fix-my-city-udyu.onrender.com/api/auth/register', {
+      const response = await api.post('/auth/register', {
         name,
         email,
         password,
+        role,
+        adminCode,
       });
       
       const { token, user } = response.data;
       localStorage.setItem('token', token);
       localStorage.setItem('user', JSON.stringify(user));
-      axios.defaults.headers.common['x-auth-token'] = token;
       setUser(user);
       return { success: true };
     } catch (error) {
@@ -74,7 +73,6 @@ export const AuthProvider = ({ children }) => {
   const logout = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
-    delete axios.defaults.headers.common['x-auth-token'];
     setUser(null);
   };
 
