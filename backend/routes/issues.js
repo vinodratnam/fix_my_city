@@ -1,22 +1,44 @@
 const express = require('express');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
+const streamifier = require('streamifier');
 const Issue = require('../models/Issue');
 const auth = require('../middleware/auth');
 const { SLA_DAYS } = require('../services/slaService');
 
 const router = express.Router();
 
-// Cloudinary configuration - temporarily disabled due to invalid credentials
-// cloudinary.config({
-//   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-//   api_key: process.env.CLOUDINARY_API_KEY,
-//   api_secret: process.env.CLOUDINARY_API_SECRET
-// });
+// ── Cloudinary Configuration ──────────────────────────────────────────────────
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
-// Multer configuration for file upload
+// ── Helper: upload buffer to Cloudinary ──────────────────────────────────────
+const uploadToCloudinary = (buffer, folder = 'civicwatch') => {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      { folder, resource_type: 'image', quality: 'auto', fetch_format: 'auto' },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result.secure_url);
+      }
+    );
+    streamifier.createReadStream(buffer).pipe(uploadStream);
+  });
+};
+
+// ── Multer: memory storage (we stream the buffer to Cloudinary) ───────────────
 const storage = multer.memoryStorage();
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB max
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Only image files are allowed'), false);
+  },
+});
 
 // Get all issues
 router.get('/', async (req, res) => {
@@ -151,11 +173,17 @@ router.post('/', auth, upload.single('image'), async (req, res) => {
     //   return res.status(400).json({ message: 'Image is required' });
     // }
 
-    // Convert uploaded image to Base64 data URI if present, otherwise use placeholder
-    let imageUrl = 'https://picsum.photos/seed/infrastructure/400/300.jpg';
+    // Upload image to Cloudinary (or use placeholder if no file)
+    let imageUrl = 'https://res.cloudinary.com/dxyp1g0l2/image/upload/v1/civicwatch/placeholder.jpg';
     if (req.file) {
-      const base64Data = req.file.buffer.toString('base64');
-      imageUrl = `data:${req.file.mimetype};base64,${base64Data}`;
+      try {
+        imageUrl = await uploadToCloudinary(req.file.buffer, 'civicwatch/issues');
+        console.log('[Cloudinary] Issue image uploaded:', imageUrl);
+      } catch (uploadErr) {
+        console.error('[Cloudinary] Upload failed, using placeholder:', uploadErr.message);
+        // Fallback to picsum placeholder if Cloudinary fails
+        imageUrl = 'https://picsum.photos/seed/infrastructure/400/300.jpg';
+      }
     }
 
     const priority = req.body.priority || 'medium';
@@ -220,10 +248,15 @@ router.put('/:id/status', auth, upload.single('afterImage'), async (req, res) =>
     issue.status = status;
     issue.updatedAt = Date.now();
 
-    // Add after image as base64 data URI if provided, otherwise use placeholder
+    // Upload after-image to Cloudinary if provided
     if (req.file) {
-      const base64Data = req.file.buffer.toString('base64');
-      issue.afterImageUrl = `data:${req.file.mimetype};base64,${base64Data}`;
+      try {
+        issue.afterImageUrl = await uploadToCloudinary(req.file.buffer, 'civicwatch/resolutions');
+        console.log('[Cloudinary] Resolution proof uploaded:', issue.afterImageUrl);
+      } catch (uploadErr) {
+        console.error('[Cloudinary] After-image upload failed:', uploadErr.message);
+        issue.afterImageUrl = 'https://picsum.photos/seed/resolved/400/300.jpg';
+      }
     } else if (status === 'resolved') {
       issue.afterImageUrl = 'https://picsum.photos/seed/resolved/400/300.jpg';
     }
